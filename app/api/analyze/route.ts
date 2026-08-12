@@ -43,6 +43,7 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
     "뚜레쥬르",
     "베이커리",
   ],
+
   교통: [
     "카카오택시",
     "우버",
@@ -69,6 +70,7 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
     "하이패스",
     "주차",
   ],
+
   쇼핑: [
     "쿠팡",
     "네이버",
@@ -93,6 +95,7 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
     "나이키",
     "아디다스",
   ],
+
   의료: [
     "병원",
     "의원",
@@ -111,6 +114,7 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
     "소아과",
     "응급",
   ],
+
   "문화/여가": [
     "CGV",
     "롯데시네마",
@@ -139,6 +143,7 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
     "알라딘",
     "예스24",
   ],
+
   구독: [
     "구독",
     "정기결제",
@@ -158,6 +163,7 @@ const CATEGORY_KEYWORDS: Record<string, string[]> = {
     "AWS",
     "클라우드",
   ],
+
   이체: [
     "이체",
     "송금",
@@ -178,34 +184,54 @@ function classifyCategory(merchant: string): string {
       return category;
     }
   }
+
   return "기타";
 }
 
-function parseSMS(
-  smsText: string,
-): Array<{ merchant: string; amount: number; category: string; date: string }> {
-  const results = [];
+function parseSMS(smsText: string): Array<{
+  merchant: string;
+  amount: number;
+  category: string;
+  date: string;
+}> {
+  const results: Array<{
+    merchant: string;
+    amount: number;
+    category: string;
+    date: string;
+  }> = [];
+
   const lines = smsText.split("\n").filter((line) => line.trim());
+
   const today = new Date().toISOString().split("T")[0];
 
   for (const line of lines) {
-    // 금액 추출 (숫자,숫자원 패턴)
+    // 금액 추출
     const amountMatch = line.match(/([0-9,]+)원/);
+
     if (!amountMatch) continue;
 
-    const amount = parseInt(amountMatch[1].replace(/,/g, ""));
+    const amount = parseInt(amountMatch[1].replace(/,/g, ""), 10);
+
     if (amount <= 0) continue;
 
-    // 날짜 추출 (MM/DD 패턴)
+    // 날짜 추출
     const dateMatch = line.match(/(\d{2})\/(\d{2})/);
+
     let date = today;
+
     if (dateMatch) {
       const year = new Date().getFullYear();
-      date = `${year}-${dateMatch[1].padStart(2, "0")}-${dateMatch[2].padStart(2, "0")}`;
+
+      date = `${year}-${dateMatch[1].padStart(
+        2,
+        "0",
+      )}-${dateMatch[2].padStart(2, "0")}`;
     }
 
-    // 가맹점명 추출 — 승인/원 사이 또는 카드사 뒤 텍스트
+    // 가맹점명 추출
     let merchant = "알 수 없음";
+
     const merchantMatch =
       line.match(/승인\s+([^\s\d]+(?:\s+[^\s\d]+)*)\s+[\d,]+원/) ||
       line.match(/[\d,]+원\s+승인\s+(.+?)\s+잔액/) ||
@@ -214,7 +240,7 @@ function parseSMS(
     if (merchantMatch) {
       merchant = merchantMatch[1].trim();
     } else {
-      // 카드사명 제거 후 첫 번째 한글 단어
+      // 카드사명 제거
       const cleaned = line
         .replace(/\[.*?\]/g, "")
         .replace(
@@ -222,13 +248,22 @@ function parseSMS(
           "",
         )
         .trim();
+
       const wordMatch = cleaned.match(/([가-힣a-zA-Z]+(?:\s[가-힣a-zA-Z]+)*)/);
-      if (wordMatch) merchant = wordMatch[1].trim();
+
+      if (wordMatch) {
+        merchant = wordMatch[1].trim();
+      }
     }
 
     const category = classifyCategory(merchant + " " + line);
 
-    results.push({ merchant, amount, category, date });
+    results.push({
+      merchant,
+      amount,
+      category,
+      date,
+    });
   }
 
   return results;
@@ -238,33 +273,66 @@ export async function POST(req: NextRequest) {
   try {
     const { smsText, userId } = await req.json();
 
-    const transactions = parseSMS(smsText);
-    if (transactions.length === 0) {
+    if (!smsText) {
       return NextResponse.json(
-        { error: "지출 내역을 찾을 수 없어요. SMS 형식을 확인해주세요." },
-        { status: 400 },
+        {
+          error: "SMS 문자를 입력해주세요.",
+        },
+        {
+          status: 400,
+        },
       );
     }
 
+    const transactions = parseSMS(smsText);
+
+    if (transactions.length === 0) {
+      return NextResponse.json(
+        {
+          error: "지출 내역을 찾을 수 없어요. SMS 형식을 확인해주세요.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    // Supabase 서버용 클라이언트
     const supabase = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.SUPABASE_SERVICE_ROLE_KEY!,
     );
 
-    const rows = transactions.map((t) => ({
+    const rows = transactions.map((transaction) => ({
       user_id: userId,
-      amount: t.amount,
-      merchant: t.merchant,
-      category: t.category,
-      transaction_date: t.date,
+      amount: transaction.amount,
+      merchant: transaction.merchant,
+      category: transaction.category,
+      transaction_date: transaction.date,
       raw_sms: smsText,
     }));
 
+    // Supabase에 저장
     const { error } = await supabase.from("transactions").insert(rows);
-    if (error) throw new Error(error.message);
 
-    return NextResponse.json({ success: true, count: rows.length });
+    if (error) {
+      throw new Error(error.message);
+    }
+
+    // 분석 결과를 프론트엔드로 반환
+    return NextResponse.json({
+      success: true,
+      count: rows.length,
+      transactions,
+    });
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return NextResponse.json(
+      {
+        error: err.message || "분석 중 오류가 발생했습니다.",
+      },
+      {
+        status: 500,
+      },
+    );
   }
 }
